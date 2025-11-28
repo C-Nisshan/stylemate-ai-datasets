@@ -1,203 +1,221 @@
-#!/usr/bin/env python3
-"""
-scrape_pexels.py
-
-Legal, API-based downloader for Pexels images.
-Saves images into:
-  - ../raw/body/
-  - ../raw/skin/
-
-Usage:
-  1) Get a PEXELS_API_KEY from https://www.pexels.com/api/
-  2) Export as environment variable:
-       export PEXELS_API_KEY="your_key_here"
-  3) Run:
-       python3 scrape_pexels.py
-
-Notes:
-  - This script uses the official Pexels API and respects simple rate-limiting behaviour.
-  - Do NOT use it to download copyrighted images for commercial use unless license permits.
-"""
-
 import os
 import time
-import requests
 import json
+import requests
 from pathlib import Path
 from typing import Dict, Any
 
-# -----------------------
-# Configuration
-# -----------------------
-PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "YOUR_PEXELS_API_KEY")
+# ---------------------------------------------------
+# CONFIG
+# ---------------------------------------------------
+
+PEXELS_API_KEY = "GShKntn6aeVJls7SRp8TDU3HQEdaEFFFUQDCItLB84E450GnrFRcNxgU"
 BASE_URL = "https://api.pexels.com/v1/search"
 HEADERS = {"Authorization": PEXELS_API_KEY}
 
+# Auto-detect repo root (fashion-ai-datasets/)
 ROOT = Path(__file__).resolve().parent.parent
 
-BODY_DIR = ROOT / "raw" / "body"
-SKIN_DIR = ROOT / "raw" / "skin"
-META_FILE = ROOT / "scripts" / "pexels_metadata.json"
+RAW_DIR = ROOT / "raw"
+BODY_DIR = RAW_DIR / "body"
+SKIN_DIR = RAW_DIR / "skin"
 
-# Create directories if they don't exist
-for d in (BODY_DIR, SKIN_DIR, META_FILE.parent):
+PROGRESS_FILE = ROOT / "scripts" / "pexels_progress.json"
+METADATA_FILE = ROOT / "scripts" / "pexels_metadata.json"
+
+for d in (BODY_DIR, SKIN_DIR, PROGRESS_FILE.parent):
     d.mkdir(parents=True, exist_ok=True)
 
-# Pexels API limits: free tier is generous but avoid aggressive fetching.
-# Use small per_page and sleep between pages.
-DEFAULT_PER_PAGE = 15
-DEFAULT_SLEEP_SECONDS = 2
+DEFAULT_PER_PAGE = 20
+SLEEP_BETWEEN_PAGES = 2
 MAX_RETRIES = 3
 
-# -----------------------
+# ---------------------------------------------------
+# QUERIES
+# ---------------------------------------------------
+
+BODY_QUERIES = [
+    "full body standing woman",
+    "full body standing man",
+    "full body fashion model",
+    "street style full body",
+    "full length portrait",
+    "urban full body portrait",
+]
+
+SKIN_QUERIES = [
+    "forearm skin close up",
+    "forearm skin texture macro",
+    "arm skin texture close up",
+    "hand skin texture close up",
+    "palm skin close up",
+    "back of hand skin close up",
+    "face skin texture close up",
+    "cheek skin close up",
+    "forehead skin close up",
+    "chin skin close up",
+    "african skin texture close up",
+    "indian skin texture close up",
+    "asian skin close up",
+    "latino skin texture",
+    "fair skin texture close up",
+    "skin texture natural light",
+    "skin texture harsh light",
+    "skin texture indoor lighting",
+    "skin texture soft light",
+    "male skin texture close up",
+    "female skin texture close up"
+]
+
+# ---------------------------------------------------
+# Load progress (resume mode)
+# ---------------------------------------------------
+
+if PROGRESS_FILE.exists():
+    PROGRESS = json.loads(PROGRESS_FILE.read_text("utf-8"))
+else:
+    PROGRESS = {}
+
+# ---------------------------------------------------
 # Helpers
-# -----------------------
-def _request_with_retries(url: str, params: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
+# ---------------------------------------------------
+
+def safe_get(url: str, params: Dict[str, Any]):
+    """GET request with retry support."""
+    last_error = None
+    for attempt in range(1, MAX_RETRIES+1):
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=20)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=25)
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            last_err = e
+            last_error = e
             wait = attempt * 2
-            print(f"[WARN] Request failed (attempt {attempt}/{MAX_RETRIES}): {e}. Retrying in {wait}s...")
+            print(f"[WARN] Request error ({attempt}/{MAX_RETRIES}): {e}. Retrying {wait}s...")
             time.sleep(wait)
-    raise last_err
 
-def download_file(url: str, dest: Path):
-    """Download binary file to dest (overwrites if exists)."""
-    for attempt in range(1, MAX_RETRIES + 1):
+    raise last_error
+
+
+def download(url: str, dest: Path):
+    """Download file with retries."""
+    for attempt in range(1, MAX_RETRIES+1):
         try:
-            resp = requests.get(url, stream=True, timeout=30)
-            resp.raise_for_status()
+            r = requests.get(url, stream=True, timeout=30)
+            r.raise_for_status()
             with open(dest, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            return
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+            return True
         except Exception as e:
             wait = attempt * 2
-            print(f"[WARN] Download failed (attempt {attempt}/{MAX_RETRIES}): {e}. Retrying in {wait}s...")
+            print(f"[WARN] Download error ({attempt}/{MAX_RETRIES}): {e}. Retrying {wait}s...")
             time.sleep(wait)
-    raise RuntimeError(f"Failed to download {url} after {MAX_RETRIES} attempts")
 
-# -----------------------
-# Core functions
-# -----------------------
-def search_and_download(query: str, output_dir: Path, pages: int = 2, per_page: int = DEFAULT_PER_PAGE, orientation: str = None):
-    """
-    Query Pexels and download images.
-     - query: search term
-     - output_dir: Path to save images
-     - pages: number of result pages to fetch
-     - orientation: optional Pexels parameter (landscape, portrait, square)
-    """
-    saved_meta = {}
-    for page in range(1, pages + 1):
-        print(f"\n[INFO] Searching page {page} for '{query}' (per_page={per_page})")
-        params = {
-            "query": query,
-            "per_page": per_page,
-            "page": page,
-        }
+    return False
+
+# ---------------------------------------------------
+# Core Scraper
+# ---------------------------------------------------
+
+def scrape_query(query: str, out_dir: Path, max_pages=5, per_page=DEFAULT_PER_PAGE, orientation=None):
+    print(f"\n=== Query: {query} ===")
+
+    # Resume from last successful page
+    start_page = PROGRESS.get(query, 0) + 1
+    print(f"[INFO] Resuming from page {start_page}")
+
+    # Load old metadata
+    if METADATA_FILE.exists():
+        metadata = json.loads(METADATA_FILE.read_text("utf-8"))
+    else:
+        metadata = {}
+
+    for page in range(start_page, max_pages + 1):
+
+        print(f"\n[PAGE] {page}/{max_pages}")
+
+        params = {"query": query, "page": page, "per_page": per_page}
         if orientation:
             params["orientation"] = orientation
 
-        data = _request_with_retries(BASE_URL, params=params, headers=HEADERS)
+        data = safe_get(BASE_URL, params)
         photos = data.get("photos", [])
+
+        # Stop if no more data
         if not photos:
-            print("[INFO] No photos on this page; stopping.")
+            print("[INFO] No more results. Ending.")
             break
 
-        for p in photos:
-            photo_id = p.get("id")
-            src = p.get("src", {})
-            # Pexels provides multiple sizes; prefer 'original' or 'large'
-            img_url = src.get("original") or src.get("large") or src.get("medium")
-            if not img_url:
-                continue
+        print(f"[INFO] Found {len(photos)} photos")
 
-            filename = f"pexels_{photo_id}.jpg"
-            dest = output_dir / filename
+        for photo in photos:
+            photo_id = photo["id"]
+            fname = f"pexels_{photo_id}.jpg"
+            dest = out_dir / fname
+
+            # Duplicate check BEFORE API usage
             if dest.exists():
-                print(f"[SKIP] {filename} already exists.")
-                saved_meta[filename] = {"id": photo_id, "url": img_url, "skipped": True}
+                print(f"[SKIP] Already exists: {fname}")
                 continue
 
-            print(f"[DOWN] {filename} from {img_url}")
-            try:
-                download_file(img_url, dest)
-                saved_meta[filename] = {
-                    "id": photo_id,
-                    "url": img_url,
-                    "photographer": p.get("photographer"),
-                    "photographer_url": p.get("photographer_url"),
-                    "page_url": p.get("url"),
-                }
-            except Exception as e:
-                print(f"[ERROR] Failed to download {img_url}: {e}")
-        # Respectful pause between pages
-        print(f"[INFO] Sleeping {DEFAULT_SLEEP_SECONDS}s to be polite to the API.")
-        time.sleep(DEFAULT_SLEEP_SECONDS)
+            src = photo.get("src", {})
+            img_url = src.get("original") or src.get("large") or src.get("medium")
 
-    # Append metadata to file
-    if META_FILE.exists():
-        try:
-            with open(META_FILE, "r", encoding="utf-8") as f:
-                merged = json.load(f)
-        except Exception:
-            merged = {}
-        merged.update(saved_meta)
-    else:
-        merged = saved_meta
+            if not img_url:
+                print(f"[WARN] No valid URL for {photo_id}")
+                continue
 
-    with open(META_FILE, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-    print(f"[INFO] Saved metadata entries: {len(saved_meta)} -> {META_FILE}")
+            print(f"[DOWN] {fname}")
+            ok = download(img_url, dest)
+            if not ok:
+                print(f"[ERROR] Failed download: {fname}")
+                continue
 
-def download_body_images(pages: int = 3):
-    """
-    Download full-body fashion images that are likely to contain standing/whole-body shots.
-    Query ideas: "full body fashion model", "full body portrait", "street style full body"
-    """
-    queries = [
-        "full body fashion model",
-        "full body portrait",
-        "full length portrait",
-        "street style full body"
-    ]
-    for q in queries:
-        search_and_download(q, BODY_DIR, pages=pages)
+            # Save metadata
+            metadata[fname] = {
+                "id": photo_id,
+                "url": img_url,
+                "photographer": photo.get("photographer"),
+                "page_url": photo.get("url"),
+            }
 
-def download_skin_images(pages: int = 2):
-    """
-    Download close-up skin/texture/forearm/skin images.
-    Query ideas: "forearm close up", "skin texture closeup", "skin care close up"
-    """
-    queries = [
-        "forearm close up",
-        "skin texture close up",
-        "skin care close up",
-        "close up skin texture"
-    ]
-    for q in queries:
-        # orientation portrait may help for closeups
-        search_and_download(q, SKIN_DIR, pages=pages, orientation="portrait")
+        # Save metadata every page
+        METADATA_FILE.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-# -----------------------
-# CLI
-# -----------------------
+        # Update progress
+        PROGRESS[query] = page
+        PROGRESS_FILE.write_text(json.dumps(PROGRESS, indent=2), encoding="utf-8")
+
+        print(f"[SAVE] Progress updated → page {page}")
+        print(f"[INFO] Sleeping {SLEEP_BETWEEN_PAGES}s")
+        time.sleep(SLEEP_BETWEEN_PAGES)
+
+# ---------------------------------------------------
+# Scrape Tasks
+# ---------------------------------------------------
+
+def scrape_body():
+    for q in BODY_QUERIES:
+        scrape_query(q, BODY_DIR)
+
+def scrape_skin():
+    for q in SKIN_QUERIES:
+        scrape_query(q, SKIN_DIR, orientation="portrait")
+
+# ---------------------------------------------------
+# Main
+# ---------------------------------------------------
+
 def main():
-    if PEXELS_API_KEY == "YOUR_PEXELS_API_KEY" or not PEXELS_API_KEY:
-        print("[ERROR] Please set your PEXELS_API_KEY environment variable. Get a key from https://www.pexels.com/api/")
+    if not PEXELS_API_KEY or PEXELS_API_KEY == "YOUR_HARDCODED_KEY_HERE":
+        print("[ERROR] Missing API key.")
         return
 
-    print("=== Pexels downloader started ===")
-    download_body_images(pages=3)
-    download_skin_images(pages=2)
-    print("=== Done ===")
+    print("\n=== Pexels Scraper Started ===")
+    #scrape_body()
+    scrape_skin()
+    print("\n=== Completed ===")
 
 if __name__ == "__main__":
     main()
