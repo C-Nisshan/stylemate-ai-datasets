@@ -5,7 +5,6 @@ __pycache__/
 
 # Data directories (large files)
 raw/
-processed/
 
 # Labels (if they are regenerated or sensitive)
 labels/
