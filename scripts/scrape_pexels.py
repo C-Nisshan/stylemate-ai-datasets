@@ -43,6 +43,41 @@ BODY_QUERIES = [
     "urban full body portrait",
 ]
 
+# === TARGETED QUERIES TO BALANCE BODY SHAPES ===
+TARGETED_BODY_QUERIES = [
+    # Hourglass (X) — missing class 1
+    "hourglass figure woman full body",
+    "curvy woman full body front view",
+    "voluptuous woman standing full body",
+    "woman with defined waist full body",
+    "marilyn monroe body type full body",
+    "kim kardashian body shape full body",
+
+    # Pear shaped (A)
+    "pear shaped woman full body",
+    "wide hips narrow shoulders woman",
+    "bottom heavy woman full body",
+    "thick thighs small waist woman",
+
+    # Apple / Rectangle (H) — also rare in fashion photos
+    "apple shaped woman full body",
+    "rectangle body shape woman standing",
+    "straight figure woman full body",
+    "athletic straight body woman",
+
+    # Plus-size & curvy (usually X or A)
+    "plus size woman full body portrait",
+    "curvy plus size model full body",
+    "bbw full body standing",
+    "thick woman full body front",
+
+    # Real people (not models)
+    "average woman full body standing",
+    "normal body woman full body",
+    "real woman no makeup full body",
+    "mom bod full body",
+]
+
 SKIN_QUERIES = [
     "forearm skin close up",
     "forearm skin texture macro",
@@ -196,7 +231,7 @@ def scrape_query(query: str, out_dir: Path, max_pages=5, per_page=DEFAULT_PER_PA
 # ---------------------------------------------------
 
 def scrape_body():
-    for q in BODY_QUERIES:
+    for q in TARGETED_BODY_QUERIES:
         scrape_query(q, BODY_DIR)
 
 def scrape_skin():
@@ -213,8 +248,8 @@ def main():
         return
 
     print("\n=== Pexels Scraper Started ===")
-    #scrape_body()
-    scrape_skin()
+    scrape_body()
+    #scrape_skin()
     print("\n=== Completed ===")
 
 if __name__ == "__main__":
