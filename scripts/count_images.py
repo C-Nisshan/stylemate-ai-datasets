@@ -13,7 +13,7 @@ def count_images(folder: Path):
     extensions = [".jpg", ".jpeg", ".png"]
     return sum(1 for f in folder.iterdir() if f.suffix.lower() in extensions)
 
-def main():count_images
+def main():
     body_count = count_images(BODY_DIR)
     skin_count = count_images(SKIN_DIR)
     total_count = body_count + skin_count
