@@ -7,7 +7,6 @@ __pycache__/
 raw/
 
 # Labels (if they are regenerated or sensitive)
-labels/
 
 # OS files
 .DS_Store

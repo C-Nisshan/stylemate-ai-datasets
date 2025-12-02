@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
 """
 extract_landmarks.py
-
-Extract 33 body pose landmarks using MediaPipe Pose from:
-    raw/body/
-
-Outputs:
-    processed/landmarks/*.json  (raw landmark arrays)
-    processed/landmarks/*.csv   (CSV flattened format)
-    scripts/landmarks_metadata.json  (log + status)
-
-Requirements:
-    pip install mediapipe opencv-python pandas
 """
-
 import cv2
 import json
 import pandas as pd
@@ -21,60 +9,59 @@ from pathlib import Path
 from datetime import datetime
 import mediapipe as mp
 
-# ---------------------------------------
-# Path Setup
-# ---------------------------------------
+# ─────────────────────────────── Paths ───────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
-
 RAW_BODY = ROOT / "raw" / "body"
 OUT_DIR = ROOT / "processed" / "landmarks"
 META_FILE = ROOT / "scripts" / "landmarks_metadata.json"
-
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------------------------------------
-# MediaPipe Pose Setup
-# ---------------------------------------
+# ───────────────────────────── MediaPipe ─────────────────────────────
 mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
-
 pose = mp_pose.Pose(
     static_image_mode=True,
-    model_complexity=1,          # Lightweight for CPU
-    enable_segmentation=False,
-    min_detection_confidence=0.50
+    model_complexity=1,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
 )
 
-# ---------------------------------------
-# Helper
-# ---------------------------------------
-def extract_landmarks_from_image(image_path):
-    """Extracts pose landmarks from a single image."""
-    img = cv2.imread(str(image_path))
-    if img is None:
-        return None
+# ────────────────────── Normalization (CORRECT!) ──────────────────────
+def normalize_landmarks(landmarks):
+    LEFT_HIP, RIGHT_HIP = 23, 24
+    LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
+    lm = landmarks
 
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = pose.process(img_rgb)
+    # Midpoints
+    hip_cx = (lm[LEFT_HIP].x + lm[RIGHT_HIP].x) / 2.0
+    hip_cy = (lm[LEFT_HIP].y + lm[RIGHT_HIP].y) / 2.0
+    shoulder_cx = (lm[LEFT_SHOULDER].x + lm[RIGHT_SHOULDER].x) / 2.0
+    shoulder_cy = (lm[LEFT_SHOULDER].y + lm[RIGHT_SHOULDER].y) / 2.0
 
-    if not results.pose_landmarks:
-        return None
+    # Center of torso
+    center_x = (hip_cx + shoulder_cx) / 2
+    center_y = (hip_cy + shoulder_cy) / 2
 
-    lm_list = []
-    for lm in results.pose_landmarks.landmark:
-        lm_list.append({
-            "x": lm.x,
-            "y": lm.y,
-            "z": lm.z,
-            "visibility": lm.visibility
+    # Vertical scale only
+    torso_height = abs(shoulder_cy - hip_cy)
+    if torso_height < 0.01:
+        torso_height = 0.4
+
+    normalized = []
+    for lm_point in landmarks:
+        nx = lm_point.x - center_x                    # ← Raw horizontal (no scaling!)
+        ny = (lm_point.y - center_y) / torso_height   # ← Vertical normalized
+        nz = lm_point.z / torso_height
+        normalized.append({
+            "x": round(nx, 6),
+            "y": round(ny, 6),
+            "z": round(nz, 6),
+            "visibility": round(lm_point.visibility, 6)
         })
+    return normalized
 
-    return lm_list
 
-
-def flatten_landmarks(landmark_list):
-    """Converts list of dicts to one flattened dict for CSV."""
-    flat = {}
+def flatten_landmarks(landmark_list, filename: str):
+    flat = {"filename": filename}
     for i, lm in enumerate(landmark_list):
         flat[f"x_{i}"] = lm["x"]
         flat[f"y_{i}"] = lm["y"]
@@ -83,61 +70,64 @@ def flatten_landmarks(landmark_list):
     return flat
 
 
-# ---------------------------------------
-# Main Processing
-# ---------------------------------------
+# ───────────────────────────── Main ─────────────────────────────
 def main():
-    print("=== MediaPipe Landmark Extraction Started ===")
-    metadata = {}
+    print("=== Extracting Landmarks + AUTO-DELETE NO-PERSON IMAGES ===")
+    print(f"Source: {RAW_BODY}\n")
+
     csv_rows = []
+    metadata = {}
+    deleted_count = kept_count = 0
 
-    for file in RAW_BODY.iterdir():
-        if file.suffix.lower() not in [".jpg", ".png", ".jpeg"]:
+    images = sorted([
+        f for f in RAW_BODY.iterdir()
+        if f.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    ])
+
+    for idx, img_path in enumerate(images, 1):
+        print(f"[{idx:4d}/{len(images)}] {img_path.name}", end="")
+
+        img = cv2.imread(str(img_path))
+        if img is None:
+            print(" → [BAD FILE] DELETING")
+            img_path.unlink()
+            deleted_count += 1
             continue
 
-        print(f"\n[IMG] Processing: {file.name}")
-
-        land = extract_landmarks_from_image(file)
-        entry = {
-            "file": file.name,
-            "timestamp": datetime.now().isoformat()
-        }
-
-        if land is None:
-            print("[WARN] No person detected — skipped")
-            entry["status"] = "no_person"
-            metadata[file.name] = entry
+        results = pose.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        if not results.pose_landmarks:
+            print(" → [NO PERSON] DELETING")
+            img_path.unlink()
+            deleted_count += 1
+            metadata[img_path.name] = {"status": "deleted_no_person", "when": datetime.now().isoformat()}
             continue
 
-        # Save JSON landmarks
-        json_name = f"{file.stem}.json"
-        json_path = OUT_DIR / json_name
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(land, f, indent=2)
+        normalized = normalize_landmarks(results.pose_landmarks.landmark)
 
-        # Add CSV row
-        flat = flatten_landmarks(land)
-        flat["file"] = file.name
-        csv_rows.append(flat)
+        # Save per-image JSON
+        json_path = OUT_DIR / f"{img_path.stem}.json"
+        json_path.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
 
-        entry["status"] = "ok"
-        entry["json"] = str(json_path)
-        metadata[file.name] = entry
-        print(f"[OK] Landmarks saved → {json_name}")
+        # Add to CSV
+        csv_rows.append(flatten_landmarks(normalized, img_path.name))
+        metadata[img_path.name] = {"status": "kept", "json": str(json_path)}
+        kept_count += 1
+        print(" → [KEPT]")
 
-    # Save CSV file
+    # Save master CSV
     if csv_rows:
         df = pd.DataFrame(csv_rows)
-        csv_path = OUT_DIR / "landmarks.csv"
+        csv_path = OUT_DIR / "body_landmarks.csv"
         df.to_csv(csv_path, index=False)
-        print(f"\n[CSV] Saved combined CSV → {csv_path}")
+        print(f"\n[CSV] Saved {len(df)} images → {csv_path}")
 
-    # Save metadata file
-    with open(META_FILE, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+    # Save metadata
+    META_FILE.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    print("\n=== Extraction Completed ===")
-    print(f"Metadata written → {META_FILE}")
+    print(f"\n[DONE]")
+    print(f" Kept: {kept_count} images")
+    print(f" Deleted: {deleted_count} junk/no-person images")
+    print(" raw/body/ is now 100% clean!")
 
 
 if __name__ == "__main__":
