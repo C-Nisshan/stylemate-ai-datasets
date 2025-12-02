@@ -1,135 +1,90 @@
 #!/usr/bin/env python3
 """
-auto_label_body_shape.py — FINAL VERSION
-Works perfectly with the corrected landmarks above
+auto_label_body_shape.py — GOLD STANDARD CLASSIFIER
+Uses torso-height normalized landmarks → real ratios
 """
 from pathlib import Path
-from collections import Counter
 import pandas as pd
 import numpy as np
-import math
-import sys
+from collections import Counter
 
-# ==================== PATHS ====================
 ROOT = Path(__file__).resolve().parent.parent
-LANDMARK_CSV = ROOT / "processed" / "landmarks" / "body_landmarks.csv"
+CSV = ROOT / "processed" / "landmarks" / "body_landmarks_torso_normalized.csv"
 OUT_DIR = ROOT / "labels"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_FILE = OUT_DIR / "body-shape-auto_suggest.csv"
-OUT_REJECT_FILE = OUT_DIR / "body-shape-auto_suggest_rejected.csv"
 
-# Landmark indices
-LS, RS = 11, 12  # Shoulders
-LH, RH = 23, 24  # Hips
+OUT_FILE = OUT_DIR / "body_shapes_final.csv"
 
+def dist(p1, p2):
+    return np.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
-def get_2d(row, idx):
-    try:
-        return float(row[f'x_{idx}']), float(row[f'y_{idx}'])
-    except:
-        return None
+def get_pt(row, idx):
+    return (row[f'x_{idx}'], row[f'y_{idx}'])
 
-
-def classify_body_shape(S, H, W):
-    ratio_SH = S / H if H > 0 else 0
-    ratio_WH = W / H if H > 0 else 0
-
-    # Thresholds (fine-tuned on real data)
-    if abs(S - H) / max(S, H) <= 0.12 and ratio_WH <= 0.78:
+def classify(SHR, WHR, bust_hip_diff=0.05):
+    if abs(SHR - 1.0) <= 0.10 and WHR <= 0.78:
         return "Hourglass"
-    if abs(S - H) / max(S, H) <= 0.12:
+    if abs(SHR - 1.0) <= 0.12:
         return "Rectangle"
-    if ratio_SH >= 1.15:
+    if SHR >= 1.15:
         return "Inverted Triangle"
-    if ratio_SH <= 0.87:
-        return "Triangle"
-    if W > S and W > H:
-        return "Oval"
+    if SHR <= 0.88:
+        return "Pear"  # formerly "Triangle"
+    if WHR >= 0.90:
+        return "Apple"  # formerly "Oval"
     return "Rectangle"
 
+df = pd.read_csv(CSV)
+print(f"Processing {len(df)} torso-normalized images...")
 
-# ==================== MAIN ====================
-if not LANDMARK_CSV.exists():
-    sys.exit(f"CSV not found! Run extract_landmarks.py first → {LANDMARK_CSV}")
-
-df = pd.read_csv(LANDMARK_CSV)
-print(f"Processing {len(df)} images with CORRECTED landmarks...\n")
-
-accepted = []
-rejected = []
-
+results = []
 for _, row in df.iterrows():
-    fname = str(row["filename"])
+    try:
+        ls = get_pt(row, 11); rs = get_pt(row, 12)
+        lh = get_pt(row, 23); rh = get_pt(row, 24)
 
-    ls = get_2d(row, LS)
-    rs = get_2d(row, RS)
-    lh = get_2d(row, LH)
-    rh = get_2d(row, RH)
+        shoulder_w = dist(ls, rs)
+        hip_w = dist(lh, rh)
 
-    if None in (ls, rs, lh, rh):
-        rejected.append({"filename": fname, "reason": "missing_landmarks"})
+        # Waist: average width at 40%, 50%, 60% down torso
+        waist_ws = []
+        for t in [0.4, 0.5, 0.6]:
+            wx_l = (1-t)*ls[0] + t*lh[0]
+            wx_r = (1-t)*rs[0] + t*rh[0]
+            wy_l = (1-t)*ls[1] + t*lh[1]
+            wy_r = (1-t)*rs[1] + t*rh[1]
+            waist_ws.append(dist((wx_l, wy_l), (wx_r, wy_r)))
+        waist_w = np.mean(waist_ws)
+
+        SHR = shoulder_w / hip_w
+        WHR = waist_w / hip_w
+
+        shape = classify(SHR, WHR)
+
+        results.append({
+            "filename": row["filename"],
+            "body_shape": shape,
+            "shoulder_width": round(shoulder_w, 4),
+            "hip_width": round(hip_w, 4),
+            "waist_width": round(waist_w, 4),
+            "SHR": round(SHR, 4),
+            "WHR": round(WHR, 4),
+            "shape_reason": f"SHR={SHR:.3f}, WHR={WHR:.3f}"
+        })
+        print(f"{row['filename']:50} → {shape:18} SHR={SHR:.3f} WHR={WHR:.3f}")
+    except:
         continue
 
-    S = math.hypot(ls[0] - rs[0], ls[1] - rs[1])
-    H = math.hypot(lh[0] - rh[0], lh[1] - rh[1])
+pd.DataFrame(results).to_csv(OUT_FILE, index=False)
 
-    if S < 0.05 or H < 0.05:
-        rejected.append({"filename": fname, "reason": "too_narrow_or_side_pose"})
-        continue
-
-    # Waist estimation (3 points)
-    waist_widths = []
-    for t in [0.42, 0.50, 0.58]:
-        wx_l = (1 - t) * ls[0] + t * lh[0]
-        wx_r = (1 - t) * rs[0] + t * rh[0]
-        wy_l = (1 - t) * ls[1] + t * lh[1]
-        wy_r = (1 - t) * rs[1] + t * rh[1]
-        waist_widths.append(math.hypot(wx_l - wx_r, wy_l - wy_r))
-    W = np.mean(waist_widths)
-
-    ratio_SH = S / H
-    ratio_WH = W / H if H > 0 else 0
-
-    shape = classify_body_shape(S, H, W)
-
-    reason = {
-        "Hourglass": f"S≈H, narrow waist (W/H={ratio_WH:.2f})",
-        "Rectangle": f"S≈H, straight torso (W/H={ratio_WH:.2f})",
-        "Inverted Triangle": f"Shoulders wider (S/H={ratio_SH:.2f})",
-        "Triangle": f"Hips wider (S/H={ratio_SH:.2f})",
-        "Oval": "Waist dominant"
-    }.get(shape, "Unknown")
-
-    accepted.append({
-        "filename": fname,
-        "body_shape": shape,
-        "shoulder_width": round(S, 4),
-        "hip_width": round(H, 4),
-        "waist_width": round(W, 4),
-        "ratio_SH": round(ratio_SH, 4),
-        "ratio_SW": round(S/W if W > 0 else 0, 4),
-        "ratio_WH": round(ratio_WH, 4),
-        "shape_reason": reason,
-    })
-
-    print(f"{fname[:50]:50} → {shape:18} S/H={ratio_SH:.3f} W/H={ratio_WH:.2f}")
-
-# Save results
-pd.DataFrame(accepted).to_csv(OUT_FILE, index=False)
-pd.DataFrame(rejected).to_csv(OUT_REJECT_FILE, index=False)
-
-# Final report
-counts = Counter(r["body_shape"] for r in accepted)
-total = len(accepted)
-print("\n" + "═" * 80)
-print(" FINAL BODY SHAPE DISTRIBUTION")
-print("═" * 80)
-for name in ["Hourglass", "Rectangle", "Triangle", "Inverted Triangle", "Oval"]:
+counts = Counter(r["body_shape"] for r in results)
+total = len(results)
+print("\n" + "="*80)
+print("FINAL BODY SHAPE DISTRIBUTION (TORSO-HEIGHT NORMALIZED)")
+print("="*80)
+for name in ["Hourglass", "Rectangle", "Pear", "Inverted Triangle", "Apple"]:
     c = counts.get(name, 0)
-    p = c / total * 100 if total else 0
-    bar = "█" * int(p // 2)
+    p = c/total*100 if total else 0
+    bar = "█" * int(p//2)
     print(f"{name:18} → {c:4} ({p:5.1f}%) {bar}")
-print("═" * 80)
-print(f"\nSUCCESS! {total} images labeled → {OUT_FILE}")
-if rejected:
-    print(f"{len(rejected)} rejected → {OUT_REJECT_FILE}")
+print(f"\nSaved {total} clean labels → {OUT_FILE}")
